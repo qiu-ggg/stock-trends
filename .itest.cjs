@@ -37,11 +37,39 @@ const document = {
 
 /* ---------- echarts 桩：捕获 setOption ---------- */
 const setOptionCalls = [];
+
+/* ---------- 计时器登记：供测试结束统一清理（防悬挂轮询阻止进程退出） ----------
+   被测代码 script.js:470 会 setInterval 启动自动刷新轮询（state.autoTimer），
+   若不在测试结束时清掉，事件循环会常驻、进程永不退出。这里把沙箱内的
+   定时器句柄统一登记，结束后一并清空。 */
+const liveTimers = new Set();
+function trackedSetTimeout(fn, ms, ...args) {
+  const h = setTimeout(() => { liveTimers.delete(h); if (typeof fn === 'function') fn(...args); }, ms);
+  liveTimers.add(h);
+  return h;
+}
+function trackedSetInterval(fn, ms, ...args) {
+  const h = setInterval(fn, ms, ...args);
+  liveTimers.add(h);
+  return h;
+}
+function trackedClearTimeout(h) { liveTimers.delete(h); return clearTimeout(h); }
+function trackedClearInterval(h) { liveTimers.delete(h); return clearInterval(h); }
+/** 清空被测代码遗留的全部定时器/轮询 */
+function clearAllTimers() {
+  for (const h of liveTimers) {
+    try { clearTimeout(h); } catch (e) { /* ignore */ }
+    try { clearInterval(h); } catch (e) { /* ignore */ }
+  }
+  liveTimers.clear();
+}
+
 const sandbox = {
   console, Date, Math, JSON, Promise, isNaN, parseInt, parseFloat, isFinite,
   Number, String, Array, Object, Boolean, Error, RegExp, encodeURIComponent, decodeURIComponent,
-  setTimeout, clearTimeout, setInterval, clearInterval,
-  requestAnimationFrame: function (fn) { return setTimeout(fn, 0); },
+  setTimeout: trackedSetTimeout, clearTimeout: trackedClearTimeout,
+  setInterval: trackedSetInterval, clearInterval: trackedClearInterval,
+  requestAnimationFrame: function (fn) { return trackedSetTimeout(fn, 0); },
   document,
   localStorage: (function () { const m = {}; return { getItem: (k) => (k in m ? m[k] : null), setItem: (k, v) => { m[k] = String(v); }, removeItem: (k) => { delete m[k]; } }; })(),
   scrollTo() {}, devicePixelRatio: 2,
@@ -107,7 +135,7 @@ vm.runInContext(fs.readFileSync('script.js', 'utf8'), sandbox, { filename: 'scri
 function fail(m) { console.log('✗ ' + m); process.exitCode = 1; }
 function ok(m) { console.log('✓ ' + m); }
 
-setTimeout(async function () {
+async function run() {
   const input = getEl('stock-search-input');
   input.value = '600519';
   const fns = handlers['stock-search-input:keydown'] || [];
@@ -165,5 +193,21 @@ setTimeout(async function () {
     fail('K 线图未绘制回归导轨通道');
   }
 
-  console.log('\n结论：' + (process.exitCode ? '存在失败项' : '全部通过'));
+}
+
+/* 执行测试并确保进程主动退出：
+   被测代码会启动 setInterval 自动刷新轮询（script.js:470），若不清理会让
+   事件循环常驻、进程永不结束 —— 这里在用例结束后统一清理定时器，并显式
+   以正确退出码结束进程。 */
+setTimeout(function () {
+  run()
+    .catch((e) => {
+      console.log('✗ 测试执行异常：' + (e && e.message ? e.message : e));
+      process.exitCode = 1;
+    })
+    .then(() => {
+      clearAllTimers();
+      console.log('\n结论：' + (process.exitCode ? '存在失败项' : '全部通过'));
+      process.exit(process.exitCode || 0);
+    });
 }, 50);

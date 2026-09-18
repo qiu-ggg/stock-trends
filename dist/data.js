@@ -119,17 +119,48 @@
     return year + "-" + m[1] + "-" + m[2] + " " + m[3] + ":" + m[4];
   }
 
+  /* 关键词 → 股票解析（修复模糊匹配越界）
+     原实现三处问题：
+       1) n2.indexOf(k) 没有最小长度下限 → 单字符 'A'、'中' 也会命中"万科A""中国中免"；
+       2) 多命中直接 return 第一个 → '银行' 静默返回"招商银行"，
+          用户无从得知还有工行 / 建行 / 农行等，属静默给出无关标的；
+       3) 结果依赖 for...in 的遍历顺序 → 同一输入在不同运行中可能给出不同标的。
+     现改为：精确匹配优先 → 长度下限 2 → 收集全部命中 → 唯一命中才返回股票，
+     多命中返回 { ambiguous, candidates } 交由调用方提示歧义，并做确定性排序。 */
   function resolveStockByKeyword(keyword) {
     var k = String(keyword || "").trim();
     if (!k) return null;
-    if (STOCK_CODE_MAP[k]) return { name: k, code: STOCK_CODE_MAP[k] };
+    // 1) 精确匹配：股票名称
+    if (STOCK_CODE_MAP[k]) return { name: k, code: STOCK_CODE_MAP[k], matchType: 'exact' };
+    // 2) 精确匹配：6 位股票代码
     for (var name in STOCK_CODE_MAP) {
-      if (STOCK_CODE_MAP[name] === k) return { name: name, code: k };
+      if (STOCK_CODE_MAP[name] === k) return { name: name, code: k, matchType: 'code' };
     }
-    for (var n2 in STOCK_CODE_MAP) {
-      if (n2.indexOf(k) !== -1 || (k.length >= 2 && k.indexOf(n2) !== -1)) return { name: n2, code: STOCK_CODE_MAP[n2] };
+    // 3) 模糊匹配：至少 2 个字符，避免单字命中大量无关标的
+    if (k.length < 2) return null;
+
+    var hits = [];
+    var n2;
+    // 3a) 输入是名称片段（如"五粮"命中"五粮液"）
+    for (n2 in STOCK_CODE_MAP) {
+      if (n2.indexOf(k) !== -1) hits.push(n2);
     }
-    return null;
+    // 3b) 输入是长文本（如粘贴的一段话），反向从文本中抽取股票名
+    if (!hits.length) {
+      for (n2 in STOCK_CODE_MAP) {
+        if (k.indexOf(n2) !== -1) hits.push(n2);
+      }
+    }
+    if (!hits.length) return null;
+    // 确定性排序：名称越短越接近输入，其次按字典序 —— 同一输入必得同一结果
+    hits.sort(function (a, b) {
+      if (a.length !== b.length) return a.length - b.length;
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    if (hits.length > 1) {
+      return { ambiguous: true, keyword: k, candidates: hits.slice(0, 8), total: hits.length };
+    }
+    return { name: hits[0], code: STOCK_CODE_MAP[hits[0]], matchType: 'fuzzy' };
   }
 
   /* ---------------- 股吧解析 ---------------- */
@@ -484,17 +515,98 @@
     }).catch(function () { return []; });
   }
 
-  function readLastHot() {
-    try { return JSON.parse(localStorage.getItem("stock-last-hot") || "{}"); } catch (e) { return {}; }
-  }
-  function saveLastHot(map) {
-    try { localStorage.setItem("stock-last-hot", JSON.stringify(map)); } catch (e) {}
-  }
-  function simulateDelta(keyword) {
-    var h = 0;
-    for (var i = 0; i < keyword.length; i++) h = (h * 31 + keyword.charCodeAt(i)) % 1000;
-    return Math.round(((h % 60) - 30) / 10) * 10;
-  }
+  /* ================================================================
+   * HotStore —— 热度基线仓储 + 变化率策略
+   * ----------------------------------------------------------------
+   * 职责边界：本次重构把原先散落在 computeHotItems 里的
+   *   readLastHot / saveLastHot / simulateDelta 三个自由函数
+   *   收敛为单一仓储模块，对外只暴露 load / save / resolveDelta。
+   *
+   * 修复的两个缺陷：
+   *   #1 写入门禁缺失：抓取失败会产生空池，原实现无条件覆盖基线
+   *      → 现在 save() 只在快照有效（≥1 条合法数值）时落盘；
+   *   #2 伪造变化率：原 simulateDelta 用关键词哈希生成伪涨幅并当真实
+   *      数据展示 → 现在变化率由策略表求解，无基线时返回 null，
+   *      由展示层降级为"首次统计"，不再编造数值。
+   * ================================================================ */
+  var HotStore = (function () {
+    var STORAGE_KEY = "stock-last-hot";
+    var MAX_ENTRIES = 60;   // 基线容量上限，防止 localStorage 无限膨胀
+
+    /* 变化率来源策略表（多态）：不同来源 → 不同的可算性与展示语义 */
+    var DELTA_STRATEGY = {
+      // 有上一轮基线：可算真实变化率
+      baseline: {
+        available: true, label: null, cls: null,
+        compute: function (heat, prevHeat) {
+          return Math.round(((heat - prevHeat) / prevHeat) * 1000) / 10;
+        }
+      },
+      // 首次出现（或基线已失效）：无法计算变化率，明确告知而非编造
+      firstSeen: {
+        available: false, label: '首次统计', cls: 'flat',
+        compute: function () { return null; }
+      }
+    };
+
+    /** 读取基线；逐项校验，脏数据不进入计算链路 */
+    function load() {
+      var raw;
+      try { raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); }
+      catch (e) { return {}; }
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+      var clean = {};
+      for (var k in raw) {
+        if (!Object.prototype.hasOwnProperty.call(raw, k)) continue;
+        var v = raw[k];
+        if (typeof v === "number" && isFinite(v) && v > 0) clean[k] = v;
+      }
+      return clean;
+    }
+
+    /** 快照有效性判定：空池 / 全非法值均视为无效 */
+    function isValidSnapshot(map) {
+      if (!map || typeof map !== "object") return false;
+      var n = 0;
+      for (var k in map) {
+        if (!Object.prototype.hasOwnProperty.call(map, k)) continue;
+        if (typeof map[k] === "number" && isFinite(map[k]) && map[k] > 0) n++;
+      }
+      return n > 0;
+    }
+
+    /** 写入门禁：无效快照直接丢弃，保留上一次有效基线（缺陷 #1 修复点） */
+    function save(map) {
+      if (!isValidSnapshot(map)) return false;
+      var keys = Object.keys(map);
+      if (keys.length > MAX_ENTRIES) {
+        keys.sort(function (a, b) { return map[b] - map[a]; });
+        var trimmed = {};
+        keys.slice(0, MAX_ENTRIES).forEach(function (k) { trimmed[k] = map[k]; });
+        map = trimmed;
+      }
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(map)); return true; }
+      catch (e) { return false; }
+    }
+
+    /** 变化率求解：按策略表分派，返回 {delta,label,cls,source} */
+    function resolveDelta(keyword, heat, prevMap) {
+      var prev = prevMap || {};
+      var prevHeat = prev[keyword];
+      var hasBaseline = typeof prevHeat === "number" && isFinite(prevHeat) && prevHeat > 0;
+      var st = hasBaseline ? DELTA_STRATEGY.baseline : DELTA_STRATEGY.firstSeen;
+      return { delta: st.compute(heat, prevHeat), label: st.label, cls: st.cls, source: hasBaseline ? "baseline" : "firstSeen" };
+    }
+
+    return {
+      load: load,
+      save: save,
+      isValidSnapshot: isValidSnapshot,
+      resolveDelta: resolveDelta,
+      DELTA_STRATEGY: DELTA_STRATEGY,
+      STORAGE_KEY: STORAGE_KEY
+    };
+  })();
 
   function computeHotItems(pool) {
     var stats = {};
@@ -520,14 +632,12 @@
     ranked.sort(function (a, b) { return b.score - a.score; });
     ranked = ranked.slice(0, 10);
 
-    var prev = readLastHot();
+    var prev = HotStore.load();
     var current = {};
     var items = ranked.map(function (s, idx) {
       var heat = Math.round(s.score);
-      var prevHeat = prev[s.keyword];
-      var delta;
-      if (typeof prevHeat === "number" && prevHeat > 0) delta = Math.round(((heat - prevHeat) / prevHeat) * 1000) / 10;
-      else delta = simulateDelta(s.keyword);
+      /* 变化率交给策略表分派：有基线才算差值，无基线返回 null 并带展示语义 */
+      var d = HotStore.resolveDelta(s.keyword, heat, prev);
       current[s.keyword] = heat;
       var platforms = Object.keys(s.platforms);
       var sent = s.sent;
@@ -537,14 +647,17 @@
         rank: idx + 1,
         keyword: s.keyword,
         heat: heat,
-        delta: delta,
+        delta: d.delta,
+        deltaLabel: d.label,
+        deltaSource: d.source,
         mentions: s.mentions,
         platforms: platforms,
         sentiment: dominant,
         summary: ""
       };
     });
-    saveLastHot(current);
+    /* 写入门禁在 HotStore.save 内部：空池不会覆盖历史基线 */
+    HotStore.save(current);
     return items;
   }
 
@@ -1104,12 +1217,30 @@
         });
       }
 
-      /* 4. RSI */
+      /* 4. RSI —— 档位表驱动（修复死区）
+         原实现是四条 if / else if 链，条件为 >=75 / <=28 / >=55 / <=45，
+         区间 (45, 55) 不被任何分支覆盖 → 该区间静默无输出（死区）。
+         现改为档位表 + 末条无条件兜底：前四档与原条件逐字等价（含边界），
+         末档保证任何取值都有归属，从结构上杜绝"新增档位再留空隙"。 */
       if (ind.rsi != null) {
-        if (ind.rsi >= 75) push({ id: 'rsi-ob', dim: '超买超卖', name: 'RSI超买', side: 'bear', strength: 3, weight: 6, text: 'RSI 进入超买区，短线追高风险上升', evidence: 'RSI(14)=' + ind.rsi });
-        else if (ind.rsi <= 28) push({ id: 'rsi-os', dim: '超买超卖', name: 'RSI超卖', side: 'bull', strength: 3, weight: 6, text: 'RSI 进入超卖区，存在超跌反弹动能', evidence: 'RSI(14)=' + ind.rsi });
-        else if (ind.rsi >= 55) push({ id: 'rsi-strong', dim: '超买超卖', name: 'RSI偏强', side: 'bull', strength: 2, weight: 5, text: 'RSI 位于强势区，多方掌握主动', evidence: 'RSI(14)=' + ind.rsi });
-        else if (ind.rsi <= 45) push({ id: 'rsi-weak', dim: '超买超卖', name: 'RSI偏弱', side: 'bear', strength: 2, weight: 5, text: 'RSI 位于弱势区，多方动能不足', evidence: 'RSI(14)=' + ind.rsi });
+        var RSI_BANDS = [
+          { id: 'rsi-ob', name: 'RSI超买', side: 'bear', strength: 3, weight: 6, text: 'RSI 进入超买区，短线追高风险上升', match: function (r) { return r >= 75; } },
+          { id: 'rsi-os', name: 'RSI超卖', side: 'bull', strength: 3, weight: 6, text: 'RSI 进入超卖区，存在超跌反弹动能', match: function (r) { return r <= 28; } },
+          { id: 'rsi-strong', name: 'RSI偏强', side: 'bull', strength: 2, weight: 5, text: 'RSI 位于强势区，多方掌握主动', match: function (r) { return r >= 55; } },
+          { id: 'rsi-weak', name: 'RSI偏弱', side: 'bear', strength: 2, weight: 5, text: 'RSI 位于弱势区，多方动能不足', match: function (r) { return r <= 45; } },
+          { id: 'rsi-mid', name: 'RSI中性', side: 'neutral', strength: 1, weight: 3, text: 'RSI 处于中性区间，多空动能均衡，暂无明显超买或超卖', match: function () { return true; } }
+        ];
+        for (var rb = 0; rb < RSI_BANDS.length; rb++) {
+          if (RSI_BANDS[rb].match(ind.rsi)) {
+            var rband = RSI_BANDS[rb];
+            push({
+              id: rband.id, dim: '超买超卖', name: rband.name, side: rband.side,
+              strength: rband.strength, weight: rband.weight, text: rband.text,
+              evidence: 'RSI(14)=' + ind.rsi
+            });
+            break;
+          }
+        }
       }
 
       /* 5. KDJ */
@@ -1528,19 +1659,128 @@
       supports.sort(function (a, b) { return b.price - a.price; });
 
       var entryLo = r2(P - atr * 1.5), entryHi = r2(P - atr * 0.5);
-      var stopLoss = r2(P - atr * 2.5), hardStop = r2(P - atr * 3.5);
+
+      /* 止损锚定策略（修复缺陷 #3 的"随动位"部分）：
+         先尝试把止损锚定到 keyLevels 里的**绝对支撑位**（来自 K 线枢轴，不随现价移动）；
+         仅当不存在合适支撑、或距离不在合理区间（1.2 ~ 3.5 ATR）时才退回 ATR 随动位，
+         并把 staticAnchored 置 false，交由展示层披露"该位随价格移动"。 */
+      var atrSafe = atr > 0 ? atr : (P > 0 ? P * 0.02 : 0);
+      var anchorCandidates = supports.filter(function (x) {
+        return isNum(x.price) && x.price < P &&
+          (P - x.price) >= atrSafe * 1.2 && (P - x.price) <= atrSafe * 3.5;
+      }).sort(function (a, b) { return b.price - a.price; });
+
+      var staticAnchored = anchorCandidates.length > 0 && atrSafe > 0;
+      var stopLoss = staticAnchored ? r2(anchorCandidates[0].price) : r2(P - atrSafe * 2.5);
+
+      var hardCandidate = null;
+      for (var si = 0; si < supports.length; si++) {
+        var sp = supports[si];
+        if (isNum(sp.price) && sp.price < P && (P - sp.price) > atrSafe * 3.5) { hardCandidate = sp; break; }
+      }
+      var hardStop = hardCandidate ? r2(hardCandidate.price)
+        : (staticAnchored ? r2(stopLoss - atrSafe) : r2(P - atrSafe * 3.5));
+      if (hardStop == null || hardStop >= stopLoss) hardStop = r2(stopLoss - atrSafe);  // 硬止损必须严格低于止损位
 
       var minTgtDist = atr * 1.2;
       var farRes = resistances.filter(function (r) { return r.price >= P + minTgtDist; });
       var target1 = farRes[0] ? farRes[0].price : r2(P + atr * 4);
-      var target2 = farRes.filter(function (r) { return r.price > target1; })[0];
-      target2 = target2 ? target2.price : r2(P + atr * 7);
-      if (target2 == null || target2 <= target1) target2 = r2(target1 + atr * 3);
+      /* 两档目标位的最小间距（修复 target2 与 target1 几乎重合）
+         原实现只判断 target2 > target1，若存在仅略高于 target1 的阻力位
+         （实测 40.03 vs 40.05，仅差 0.05%），"分批止盈"两档将失去区分度。
+         现要求第二目标位至少比第一目标位远 1.2×ATR（与 minTgtDist 同口径），
+         不满足则退回 target1 + 3×ATR 的保守方案。 */
+      var minTgtGap = atr * 1.2;
+      var target2 = farRes.filter(function (r) { return r.price >= target1 + minTgtGap; })[0];
+      target2 = target2 ? target2.price : r2(target1 + atr * 3);
+      if (target2 == null || target2 <= target1 + minTgtGap) target2 = r2(target1 + atr * 3);
 
       return {
         entry: [entryLo, entryHi], stopLoss: stopLoss, hardStop: hardStop,
         target1: target1, target2: target2, positionLimit: 0.1,
-        atr: r2(atr), supports: supports, resistances: resistances
+        atr: r2(atr), supports: supports, resistances: resistances,
+        staticAnchored: staticAnchored,
+        anchorNote: staticAnchored
+          ? '止损位锚定于绝对支撑 ' + stopLoss + ' 元（来自 K 线关键位，不随现价移动，可直接作为挂单价）'
+          : '未取到合适的绝对支撑，止损位按现价下方 2.5×ATR 推导，会随价格移动，仅作参考'
+      };
+    }
+
+    /* ================================================================
+     * 价位来源策略（多态模型）
+     * ----------------------------------------------------------------
+     * 修复缺陷 #3 的核心：原来"用研报价位还是用派生价位"这件事由
+     * decideAction 内部一行 `var L = profile.auto ? {} : profile.levels`
+     * 隐式决定 —— 自动画像下 L 被置空，四个硬性风控分支静默失效，
+     * 而 buildPlan 却另起一套 deriveLevels，导致**判定与展示不同源**。
+     *
+     * 现在三种来源被抽象为同构策略对象，共用同一接口：
+     *   levels      解析后的价位集合
+     *   isStatic    是否为不随现价移动的绝对价位
+     *   disclosure  需向用户披露的口径说明
+     * 判定层（decideAction）与展示层（buildPlan / 报告）读取同一个
+     * 策略实例，从结构上消除"判定用的价位"与"展示的价位"不一致的可能。
+     * 新增价位来源（如持仓成本锚定、期权隐含位）只需注册一个策略。
+     * ================================================================ */
+    var LEVELS_STRATEGY = {
+      /* 研报画像价位：来自 profiles.js，是投研给出的静态绝对价 */
+      profile: {
+        source: 'profile', isStatic: true, disclosure: '',
+        resolve: function (L) {
+          return {
+            entry: L.entry, stopLoss: L.stopLoss, hardStop: L.hardStop,
+            target1: L.target1, target2: L.target2, positionLimit: L.positionLimit
+          };
+        },
+        note: function () { return ''; }
+      },
+      /* 引擎派生价位：锚定成功则为绝对位，否则为 ATR 随动位 */
+      derived: {
+        source: 'derived', isStatic: false, disclosure: '',
+        resolve: function (d) {
+          return {
+            entry: d.entry, stopLoss: d.stopLoss, hardStop: d.hardStop,
+            target1: d.target1, target2: d.target2, positionLimit: d.positionLimit
+          };
+        },
+        note: function (d) { return (d && d.anchorNote) || ''; }
+      },
+      /* 兜底：无任何可用价位 */
+      none: {
+        source: 'none', isStatic: false, disclosure: '',
+        resolve: function () { return {}; },
+        note: function () { return '当前无可用的入场 / 止损 / 目标价位，风控参数不参与动作判定。'; }
+      }
+    };
+
+    /** 策略选择器：按"是否具备研报价位"分派到对应策略，并回填实际静态性 */
+    function resolveLevels(profile, derived) {
+      var L = (profile && profile.levels) || null;
+      /* 关键判定：自动画像（profile.auto）的 levels 本身就是引擎推导结果，
+         并非投研给定的静态价位，必须走 derived 策略 —— 否则会把随动值
+         误判成可直接挂单的绝对价位。原实现用 `profile.auto ? {} : ...`
+         表达同一语义，重构时必须完整保留，不能只看 levels 是否存在。 */
+      var isAutoProfile = !!(profile && profile.auto);
+      var hasProfileLevels = !isAutoProfile && !!(L && (L.entry || L.stopLoss || L.hardStop || L.target1));
+      var key = hasProfileLevels ? 'profile' : (derived ? 'derived' : 'none');
+      var st = LEVELS_STRATEGY[key];
+      var levels = st.resolve(hasProfileLevels ? L : derived);
+      var note = st.note(hasProfileLevels ? L : derived);
+      // derived 策略的静态性取决于是否锚定到绝对支撑，需覆盖策略默认值
+      var isStatic = key === 'profile' ? true
+        : key === 'derived' ? !!(derived && derived.staticAnchored)
+          : false;
+      return {
+        key: key, source: st.source, levels: levels, isStatic: isStatic,
+        disclosure: isStatic ? '' : note,
+        levelsNote: note,
+        describe: function () {
+          if (key === 'profile') return '采用研报给定的止损 / 目标位（静态绝对价，可直接作为挂单价）';
+          if (key === 'derived') return isStatic
+            ? '按关键位推导的止损 / 目标位（已锚定绝对支撑，可直接作为挂单价）'
+            : '按 ATR 推导的止损 / 目标位（随现价移动，仅作参考）';
+          return '无可用价位';
+        }
       };
     }
 
@@ -1636,34 +1876,97 @@
       NOCHASE: { key: 'NOCHASE', label: '不建议追高', color: '#b45309', desc: '价格已临近或触及目标区间，此时介入的赔率不佳，建议等待回调' }
     };
 
-    /** 无持仓场景：把持仓动作转换为等价的无持仓表述 */
+    /** 无持仓场景：把持仓动作转换为等价的无持仓表述（保留风控元信息） */
     function adaptForNoPosition(action) {
-      if (action.key === 'EXIT') return assign({}, ACTIONS.AVOID, { reasons: action.reasons, confidence: action.confidence });
-      if (action.key === 'TAKE_PROFIT') return assign({}, ACTIONS.NOCHASE, { reasons: action.reasons, confidence: action.confidence });
-      if (action.key === 'REDUCE') return assign({}, ACTIONS.AVOID, { label: '建议减持/回避', desc: '利空信号占优，建议降低或暂缓建立敞口', reasons: action.reasons, confidence: action.confidence });
+      var meta = {
+        reasons: action.reasons, confidence: action.confidence,
+        riskRuleId: action.riskRuleId, levelsSource: action.levelsSource,
+        levelsStatic: action.levelsStatic, levelsNote: action.levelsNote
+      };
+      if (action.key === 'EXIT') return assign({}, ACTIONS.AVOID, meta);
+      if (action.key === 'TAKE_PROFIT') return assign({}, ACTIONS.NOCHASE, meta);
+      if (action.key === 'REDUCE') return assign({}, ACTIONS.AVOID, meta, { label: '建议减持/回避', desc: '利空信号占优，建议降低或暂缓建立敞口' });
       return action;
     }
 
-    /** 动作判定（硬性风控优先于技术信号） */
-    function decideAction(o) {
-      var composite = o.composite, ind = o.ind, profile = o.profile, signals = o.signals;
-      var P = ind.price;
-      var L = (profile && profile.auto) ? {} : ((profile && profile.levels) || {});
-      var reasons = [], action;
-      var belowHard = L.hardStop && P <= L.hardStop;
-      var belowStop = L.stopLoss && P <= L.stopLoss;
-      var aboveT1 = L.target1 && P >= L.target1;
-      var aboveT2 = L.target2 && P >= L.target2;
+    /* ================================================================
+     * 风控规则引擎（有序规则表）
+     * ----------------------------------------------------------------
+     * 修复缺陷 #3 的核心：原实现把"风控是否生效"编码在
+     *   `var L = (profile && profile.auto) ? {} : profile.levels` 这一行
+     * 隐式开关里 —— 自动画像（覆盖画像库之外的绝大多数标的）下 L 为空，
+     * 四个硬性风控分支永不执行，且无任何标记说明风控未参与判定；
+     * 而 buildPlan 另起一套 deriveLevels，造成判定与展示不同源。
+     *
+     * 现在改为两个显式有序规则集，顺序即优先级：
+     *   RISK_RULES  硬性风控（止损 / 目标位），先于评分评估
+     *   SCORE_RULES 评分映射，末条无条件兜底，保证分支全覆盖
+     * 规则以 {id, when, act, why} 声明。新增风控条件只需追加一条规则，
+     * 无需改动判定流程；价位统一取自策略对象（resolveLevels），
+     * 使"参与判定的价位"与"展示给用户的价位"结构上同源。
+     * ================================================================ */
+    var RISK_RULES = [
+      {
+        id: 'below-hard-stop', priority: 1,
+        when: function (c) { return c.L.hardStop != null && c.P <= c.L.hardStop; },
+        act: 'EXIT',
+        why: function (c) { return '价格 ' + c.P + ' 已跌破硬止损位 ' + c.L.hardStop + '，按风控纪律应无条件清仓，本金安全优先于任何反弹预期。'; }
+      },
+      {
+        id: 'below-stop-loss', priority: 2,
+        when: function (c) { return c.L.stopLoss != null && c.P <= c.L.stopLoss; },
+        act: 'EXIT',
+        why: function (c) { return '价格 ' + c.P + ' 已跌破止损位 ' + c.L.stopLoss + '，若 3 个交易日内无法收回，应执行止损离场。'; }
+      },
+      {
+        id: 'above-target-2', priority: 3,
+        when: function (c) { return c.L.target2 != null && c.P >= c.L.target2; },
+        act: 'TAKE_PROFIT',
+        why: function (c) { return '价格 ' + c.P + ' 已达第二目标位 ' + c.L.target2 + '，建议再减仓 1/3 并保留底仓，用移动止盈锁定利润。'; }
+      },
+      {
+        id: 'above-target-1', priority: 4,
+        when: function (c) { return c.L.target1 != null && c.P >= c.L.target1; },
+        act: 'TAKE_PROFIT',
+        why: function (c) { return '价格 ' + c.P + ' 已达第一目标位 ' + c.L.target1 + '，若成交量萎缩应减仓 1/3。'; }
+      }
+    ];
 
-      if (belowHard) { action = ACTIONS.EXIT; reasons.push('价格 ' + P + ' 已跌破硬止损位 ' + L.hardStop + '，按报告风控纪律应无条件清仓，本金安全优先于任何反弹预期。'); }
-      else if (belowStop) { action = ACTIONS.EXIT; reasons.push('价格 ' + P + ' 已跌破止损位 ' + L.stopLoss + '，若 3 个交易日内无法收回，应执行止损离场。'); }
-      else if (aboveT2) { action = ACTIONS.TAKE_PROFIT; reasons.push('价格 ' + P + ' 已达第二目标位 ' + L.target2 + '，建议再减仓 1/3 并保留底仓，用移动止盈锁定利润。'); }
-      else if (aboveT1) { action = ACTIONS.TAKE_PROFIT; reasons.push('价格 ' + P + ' 已达第一目标位 ' + L.target1 + '，若成交量萎缩应减仓 1/3。'); }
-      else if (composite >= 78) { action = ACTIONS.BUY; }
-      else if (composite >= 66) { action = ACTIONS.ADD; }
-      else if (composite >= 52) { action = ACTIONS.HOLD; }
-      else if (composite >= 40) { action = ind.maArrangement === 'bull' ? ACTIONS.REDUCE : ACTIONS.WATCH; }
-      else { action = ACTIONS.EXIT; }
+    var SCORE_RULES = [
+      { id: 'score-buy', when: function (c) { return c.composite >= 78; }, act: 'BUY' },
+      { id: 'score-add', when: function (c) { return c.composite >= 66; }, act: 'ADD' },
+      { id: 'score-hold', when: function (c) { return c.composite >= 52; }, act: 'HOLD' },
+      { id: 'score-reduce', when: function (c) { return c.composite >= 40 && c.maArrangement === 'bull'; }, act: 'REDUCE' },
+      { id: 'score-watch', when: function (c) { return c.composite >= 40; }, act: 'WATCH' },
+      { id: 'score-exit', when: function () { return true; }, act: 'EXIT' }
+    ];
+
+    function firstMatching(rules, ctx) {
+      for (var i = 0; i < rules.length; i++) if (rules[i].when(ctx)) return rules[i];
+      return null;
+    }
+
+    /** 动作判定：硬性风控规则先于评分规则评估 */
+    function decideAction(o) {
+      var composite = o.composite, ind = o.ind, signals = o.signals || [];
+      var P = ind.price;
+      var levelStrategy = o.levels || resolveLevels(o.profile, o.derivedLevels || null);
+      var L = levelStrategy.levels || {};
+
+      var ctx = { composite: composite, P: P, L: L, maArrangement: ind.maArrangement, ind: ind };
+      var reasons = [];
+      var riskRule = firstMatching(RISK_RULES, ctx);
+      var action, riskRuleId = null;
+
+      if (riskRule) {
+        action = ACTIONS[riskRule.act];
+        riskRuleId = riskRule.id;
+        reasons.push(riskRule.why(ctx));
+      } else {
+        action = ACTIONS[firstMatching(SCORE_RULES, ctx).act];
+      }
+      // 价位口径披露：让用户清楚止损/目标位是静态挂单价还是随动参考值
+      if (levelStrategy.levelsNote) reasons.push('【价位口径】' + levelStrategy.describe() + '。' + levelStrategy.levelsNote);
 
       var bulls = signals.filter(function (s) { return s.side === 'bull'; }).sort(function (a, b) { return b.strength * b.weight - a.strength * a.weight; });
       var bears = signals.filter(function (s) { return s.side === 'bear'; }).sort(function (a, b) { return b.strength * b.weight - a.strength * a.weight; });
@@ -1671,15 +1974,25 @@
       bears.slice(0, 3).forEach(function (s) { reasons.push('【压制】' + s.name + '：' + s.text + '（' + s.evidence + '）'); });
       reasons.push('综合评分 ' + composite + '（技术面 ' + o.techScore + ' / 策略面 ' + (o.profileScore == null ? '—' : o.profileScore) + '），结论落于「' + action.label + '」区间。');
 
-      return assign({}, action, { reasons: reasons, confidence: clamp(Math.round(Math.abs(composite - 50) * 1.8 + 20), 20, 95) });
+      return assign({}, action, {
+        reasons: reasons,
+        riskRuleId: riskRuleId,
+        levelsSource: levelStrategy.source,
+        levelsStatic: levelStrategy.isStatic,
+        levelsNote: levelStrategy.levelsNote,
+        confidence: clamp(Math.round(Math.abs(composite - 50) * 1.8 + 20), 20, 95)
+      });
     }
 
-    /** 交易计划：含硬性风控覆盖 + 盈亏比修正 */
-    function buildPlan(ind, profile, actionKey) {
+    /** 交易计划：含硬性风控覆盖 + 盈亏比修正
+     *  价位统一取自策略对象（与 decideAction 同一个实例），
+     *  从结构上消除"判定用研报价位、展示用派生价位"的不同源问题；
+     *  derived 可由调用方传入以复用已算好的推导结果。 */
+    function buildPlan(ind, levelStrategy, actionKey, derived) {
       var P = ind.price;
-      var L = (profile && profile.auto) ? {} : ((profile && profile.levels) || {});
+      var d = derived || deriveLevels(ind);
+      var L = (levelStrategy && levelStrategy.levels) || {};
       var atr = ind.atr || P * 0.02;
-      var d = deriveLevels(ind);
       var supports = d.supports, resistances = d.resistances;
 
       var entryLo = (L.entry && L.entry[0] != null) ? L.entry[0] : d.entry[0];
@@ -1688,6 +2001,8 @@
       var hardStop = L.hardStop != null ? L.hardStop : d.hardStop;
       var target1 = L.target1 != null ? L.target1 : d.target1;
       var target2 = L.target2 != null ? L.target2 : d.target2;
+      // 职责分工：这里只防"倒挂"（target2 不高于 target1）。研报给定的 target2 属投研
+      // 权威值，引擎不擅自改写；派生来源的最小间距已由 deriveLevels 的 minTgtGap 保证。
       if (target2 == null || target2 <= target1) target2 = r2(target1 + atr * 3);
 
       var refEntry = P;
@@ -1697,13 +2012,22 @@
 
       var riskDist = refStop != null ? refEntry - refStop : null;
       var wideEnough = riskDist != null && riskDist >= atr * 0.8;
-      var rrRaw = (wideEnough && target1 > refEntry) ? (target1 - refEntry) / riskDist : null;
+      /* 盈亏比的可执行前提（配套修复缺陷 #3）：现价须落在计划入场区间内。
+         否则该比值描述的是"回到某价位买入"的假设情形，与当前可交易价位无关。 */
+      var entryLoC = (L.entry && L.entry[0] != null) ? L.entry[0] : null;
+      var entryHiC = (L.entry && L.entry[1] != null) ? L.entry[1] : null;
+      var inEntryZone = (entryLoC == null || entryHiC == null)
+        ? true
+        : (P >= Math.min(entryLoC, entryHiC) && P <= Math.max(entryLoC, entryHiC));
+      var rrRaw = (wideEnough && target1 > refEntry && inEntryZone) ? (target1 - refEntry) / riskDist : null;
       var riskReward = rrRaw != null ? +rrRaw.toFixed(2) : null;
       var rrNote = riskReward != null
         ? '按参考入场价 ' + r2(refEntry) + ' 元、止损 ' + r2(refStop) + ' 元计算（风险 ' + r2(riskDist) + ' 元 ≈ ' + (riskDist / atr).toFixed(1) + '×ATR）'
-        : (riskDist != null && !wideEnough
-          ? '参考入场价 ' + r2(refEntry) + ' 元距止损 ' + r2(refStop) + ' 元仅 ' + r2(riskDist) + ' 元，不足 1×ATR（' + r2(atr) + '），止损过窄、盈亏比参考意义有限，建议按 ATR 设置动态止损'
-          : '现价已高于目标位或低于止损位，盈亏比不适用');
+        : (!inEntryZone
+          ? '现价 ' + r2(P) + ' 元已离开计划入场区间 [' + r2(entryLoC) + ', ' + r2(entryHiC) + ']，参考入场价 ' + r2(refEntry) + ' 元与当前可交易价位无关，盈亏比不适用'
+          : (riskDist != null && !wideEnough
+            ? '参考入场价 ' + r2(refEntry) + ' 元距止损 ' + r2(refStop) + ' 元仅 ' + r2(riskDist) + ' 元，不足 1×ATR（' + r2(atr) + '），止损过窄、盈亏比参考意义有限，建议按 ATR 设置动态止损'
+            : '现价已高于目标位或低于止损位，盈亏比不适用'));
 
       var positionPct = L.positionLimit ? Math.round(L.positionLimit * 100) : 10;
       var batchKind = (actionKey === 'BUY' || actionKey === 'ADD') ? 'entry'
@@ -1766,8 +2090,11 @@
         atr: r2(atr), atrPct: ind.atrPct,
         supports: supports, resistances: resistances,
         positionLimitPct: positionPct,
-        fromProfile: !!(L.entry || L.stopLoss) && !(profile && profile.auto),
-        levelsSource: (!(profile && profile.auto) && (L.entry || L.stopLoss)) ? 'profile' : 'derived',
+        fromProfile: !!(levelStrategy && levelStrategy.key === 'profile'),
+        levelsSource: levelStrategy ? levelStrategy.source : 'derived',
+        levelsStatic: !!(levelStrategy && levelStrategy.isStatic),
+        levelsNote: levelStrategy ? levelStrategy.levelsNote : '',
+        anchorNote: d.anchorNote || '',
         canEnter: batchKind !== 'exit',
         batches: batchKind === 'exit' ? exitBatches : batches,
         batchKind: batchKind
@@ -2260,6 +2587,10 @@
       var isAuto = !real;
       var profile = real || synthesizeProfile({ ind: ind, quote: q, code: ctx.code, name: ctx.name, market: ctx.market });
 
+      /* 价位来源只解析一次，判定层与展示层共用同一实例（缺陷 #3 的结构性修复） */
+      var levels = deriveLevels(ind);
+      var levelStrategy = resolveLevels(profile, levels);
+
       var mctx = { ind: ind, quote: q, flow: null, profile: profile, minutes: null };
       var monEval = evaluateMonitors(profile.monitors || [], mctx, { origin: isAuto ? 'monitor' : 'profile' });
       var signals = technicalRules(mctx).concat(channelRules(mctx)).concat(profileRules(mctx)).concat(monEval.signals);
@@ -2280,9 +2611,13 @@
       else if (monitorScore != null) composite = clamp(Math.round(techScore * 0.6 + monitorScore * 0.4), 2, 98);
       else composite = techScore;
 
-      var action = decideAction({ composite: composite, techScore: techScore, profileScore: profileScore, ind: ind, profile: profile, signals: signals });
+      var action = decideAction({
+        composite: composite, techScore: techScore, profileScore: profileScore,
+        ind: ind, profile: profile, signals: signals,
+        levels: levelStrategy, derivedLevels: levels
+      });
       if (!profile.cost) action = adaptForNoPosition(action);
-      var plan = buildPlan(ind, profile, action.key);
+      var plan = buildPlan(ind, levelStrategy, action.key, levels);
 
       /* 盈亏比风控修正：目标空间不足以覆盖止损风险时，自动下调操作级别 */
       if (plan.riskReward != null && plan.riskReward < 1 && (action.key === 'BUY' || action.key === 'ADD')) {
@@ -2290,9 +2625,13 @@
         var next = action.key === 'BUY' ? ACTIONS.ADD : ACTIONS.WATCH;
         action = assign({}, next, {
           reasons: action.reasons.concat(['【风控修正】当前盈亏比仅 ' + plan.riskReward + ' : 1（目标空间 ' + r2(((plan.target1 - ind.price) / ind.price) * 100) + '% 不足以覆盖 ' + plan.riskPct + '% 的止损风险），操作建议已由「' + prevLabel + '」自动下调为「' + next.label + '」，避免低赔率交易。']),
-          confidence: Math.max(30, action.confidence - 18)
+          confidence: Math.max(30, action.confidence - 18),
+          riskRuleId: action.riskRuleId,
+          levelsSource: action.levelsSource,
+          levelsStatic: action.levelsStatic,
+          levelsNote: action.levelsNote
         });
-        plan = buildPlan(ind, profile, action.key);
+        plan = buildPlan(ind, levelStrategy, action.key, levels);
       }
 
       var all = signals.slice().sort(function (a, b) { return b.strength * b.weight - a.strength * a.weight; });
