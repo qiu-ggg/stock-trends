@@ -1,0 +1,174 @@
+diff --git a/script.js b/script.js
+index f057fa1..55fbcf5 100644
+--- a/script.js
++++ b/script.js
+@@ -30,6 +30,40 @@
+   /* ---------- 工具函数 ---------- */
+   const $ = (id) => document.getElementById(id);
+ 
++  /* ================================================================
++   * RequestGate —— 异步请求身份闸门
++   * ----------------------------------------------------------------
++   * 修复缺陷 #4：原来每个请求各自 await 后直接渲染，请求之间没有身份
++   * 概念。用户连续搜索时，先发出的慢响应会后到并覆盖后发请求的结果
++   * （实测：输入框已是"000858 五粮液"，页面渲染的却是"贵州茅台"）。
++   *
++   * 现在按"通道（channel）"维度用 Map 记录最新令牌：发起请求时领取
++   * 自增令牌，响应回来先校验是否仍是最新，过期响应与其错误一并丢弃。
++   * 通道粒度可扩展：hot / feeds / detail / stock 各自独立互不干扰。
++   * ================================================================ */
++  const RequestGate = (function () {
++    const issued = {};   // Map: channel → 最新令牌
++    return {
++      /** 发起请求前领取令牌 */
++      begin(channel) {
++        issued[channel] = (issued[channel] || 0) + 1;
++        return issued[channel];
++      },
++      /** 响应返回时校验：false 表示已被更新的请求取代，应丢弃 */
++      isCurrent(channel, token) {
++        return issued[channel] === token;
++      },
++      /** 主动作废某通道的在途请求（如切换筛选、关闭视图） */
++      invalidate(channel) {
++        issued[channel] = (issued[channel] || 0) + 1;
++      },
++      /** 令牌快照（调试用） */
++      snapshot() {
++        return Object.assign({}, issued);
++      }
++    };
++  })();
++
+   function esc(s) {
+     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+@@ -51,9 +85,11 @@
+     return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
+   }
+ 
+-  // 后端 delta 为百分比（如 12.3 表示 +12.3%），数字统一补 % 与正负号
+-  function deltaInfo(delta) {
+-    if (delta == null || delta === '') return { text: '—', cls: 'flat' };
++  // 后端 delta 为百分比（如 12.3 表示 +12.3%），数字统一补 % 与正负号。
++  // 无历史基线时 delta 为 null，此时显示来源策略给出的语义标签（如「首次统计」），
++  // 不再用哈希伪造的数值填充（缺陷 #2 的展示侧配合改动）。
++  function deltaInfo(delta, fallbackLabel) {
++    if (delta == null || delta === '') return { text: fallbackLabel || '—', cls: 'flat' };
+     const n = Number(delta);
+     if (!isNaN(n) && String(delta).trim() !== '') {
+       const cls = n > 0 ? 'up' : n < 0 ? 'down' : 'flat';
+@@ -121,7 +157,7 @@
+     list.innerHTML = items.map(function (item) {
+       const rank = item.rank != null ? item.rank : 0;
+       const rankCls = rank === 1 ? 'top1' : rank === 2 ? 'top2' : rank === 3 ? 'top3' : '';
+-      const d = deltaInfo(item.delta);
++      const d = deltaInfo(item.delta, item.deltaLabel);
+       const senti = sentimentInfo(item.sentiment);
+       const summary = item.summary
+         ? esc(item.summary)
+@@ -169,20 +205,23 @@
+   }
+ 
+   async function fetchHot() {
++    const token = RequestGate.begin('hot');
+     setSpinning('btn-hot', true);
+     try {
+       const res = await fetch('/api/hot');
+       if (!res.ok) throw new Error('HTTP ' + res.status);
+       const data = await res.json();
++      if (!RequestGate.isCurrent('hot', token)) return;   // 已被更新的请求取代，丢弃
+       state.lastHot = data;
+       renderHot(data);
+       updateTime(data.updatedAt);
+       hideError('hot-error');
+     } catch (e) {
++      if (!RequestGate.isCurrent('hot', token)) return;   // 过期请求的报错同样不展示
+       showError('hot-error', '热点数据加载失败：' + esc(e.message));
+       if (!state.lastHot) showEmpty('hot');
+     } finally {
+-      setSpinning('btn-hot', false);
++      if (RequestGate.isCurrent('hot', token)) setSpinning('btn-hot', false);
+     }
+   }
+ 
+@@ -270,6 +309,7 @@
+   }
+ 
+   async function fetchStockDetail() {
++    const token = RequestGate.begin('detail');
+     $('detail-list').innerHTML = '<div class="loading"><span class="spinner"></span>正在抓取该股最新讨论…</div>';
+     $('detail-empty').classList.add('hidden');
+     const url = '/api/feeds?platform=all&limit=15&sort=' + state.detailSort +
+@@ -278,9 +318,11 @@
+       const res = await fetch(url);
+       if (!res.ok) throw new Error('HTTP ' + res.status);
+       const data = await res.json();
++      if (!RequestGate.isCurrent('detail', token)) return;   // 已切换股票/翻页/排序
+       renderDetailList(data);
+       updateDetailPager(data);
+     } catch (e) {
++      if (!RequestGate.isCurrent('detail', token)) return;
+       $('detail-list').innerHTML = '';
+       $('detail-empty').classList.remove('hidden');
+     }
+@@ -309,6 +351,7 @@
+   }
+ 
+   async function fetchFeeds() {
++    const token = RequestGate.begin('feeds');
+     setSpinning('btn-refresh-feeds', true);
+     $('feed-list').innerHTML = '<div class="loading"><span class="spinner"></span>加载中…</div>';
+     hideEmpty('feed');
+@@ -323,16 +366,18 @@
+       const res = await fetch(url);
+       if (!res.ok) throw new Error('HTTP ' + res.status);
+       const data = await res.json();
++      if (!RequestGate.isCurrent('feeds', token)) return;   // 搜索/翻页已变，旧结果作废
+       state.lastFeeds = data;
+       renderFeeds(data);
+       updatePager(data);
+       hideError('feed-error');
+     } catch (e) {
++      if (!RequestGate.isCurrent('feeds', token)) return;
+       showError('feed-error', '讨论内容加载失败：' + esc(e.message));
+       if (!state.lastFeeds) showEmpty('feed');
+       else renderFeeds(state.lastFeeds);
+     } finally {
+-      setSpinning('btn-refresh-feeds', false);
++      if (RequestGate.isCurrent('feeds', token)) setSpinning('btn-refresh-feeds', false);
+     }
+   }
+ 
+@@ -1409,6 +1454,7 @@
+   async function fetchStockAnalysis() {
+     const kw = $('stock-search-input').value.trim();
+     if (!kw) { $('stock-search-input').focus(); return; }
++    const token = RequestGate.begin('stock');   // 缺陷 #4：先占号，慢响应回来时据此判定是否过期
+     hideError('stock-error');
+     $('stock-body').classList.add('hidden');
+     const emptyEl = $('stock-empty');
+@@ -1420,13 +1466,22 @@
+       let code = isCode ? kw : null;
+       if (!code) {
+         const stock = STOCK_DATA.resolveStockByKeyword(kw);
+-        if (!stock) throw new Error('未识别到有效股票，请输入 6 位股票代码或公司名');
++        if (!stock) {
++          throw new Error('未识别到有效股票，请输入 6 位股票代码或公司名（模糊匹配至少需要 2 个字符）');
++        }
++        // 多义关键词不再静默取第一个，改为明确提示候选，由用户用代码精确定位
++        if (stock.ambiguous) {
++          throw new Error('「' + kw + '」匹配到 ' + stock.total + ' 只标的（'
++            + stock.candidates.join('、') + '…），请输入 6 位股票代码精确定位');
++        }
+         code = stock.code;
+       }
+       const data = await STOCK_DATA.analyzeStock(code);
++      if (!RequestGate.isCurrent('stock', token)) return;   // 用户已改查别的标的，本次结果作废
+       renderStockAnalysis(data);
+       hideError('stock-error');
+     } catch (e) {
++      if (!RequestGate.isCurrent('stock', token)) return;   // 过期请求的失败不覆盖当前界面
+       showError('stock-error', '分析失败：' + esc(e.message));
+       emptyEl.innerHTML = '<div class="empty-icon">📊</div><p>输入股票名称或代码，开始智能分析</p>';
+     }
