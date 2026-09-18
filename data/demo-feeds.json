@@ -1,0 +1,31 @@
+[
+  { "id": "dy-001", "platform": "抖音", "title": "宁德时代又涨停了，新能源龙头要起飞", "content": "宁德时代今天强势涨停，带动整个锂电板块上涨，宁德时代产业链全面爆发，利好不断，坚定看好宁德时代长期价值。", "author": "股海老船长", "heat": 12800, "minutesAgo": 8 },
+  { "id": "dy-002", "platform": "抖音", "title": "比亚迪销量再创新高，月销破30万", "content": "比亚迪销量再创新高，海外市场持续突破，比亚迪品牌向上，看多比亚迪后市表现。", "author": "新能源观察员", "heat": 9800, "minutesAgo": 15 },
+  { "id": "dy-003", "platform": "抖音", "title": "中芯国际获大基金增持", "content": "中芯国际获大基金增持，国产替代逻辑强化，中芯国际突破关键压力位。", "author": "半导体老王", "heat": 8600, "minutesAgo": 22 },
+  { "id": "dy-004", "platform": "抖音", "title": "小米集团汽车业务超预期", "content": "小米集团汽车交付超预期，小米集团股价突破前高，看多小米集团。", "author": "科技前线", "heat": 6600, "minutesAgo": 25 },
+  { "id": "dy-005", "platform": "抖音", "title": "泸州老窖高端白酒稳增长", "content": "泸州老窖高端化持续推进，泸州老窖业绩稳增长，看多泸州老窖。", "author": "白酒大咖", "heat": 4700, "minutesAgo": 65 },
+
+  { "id": "xhs-001", "platform": "小红书", "title": "姐妹们，贵州茅台跌了要不要抄底", "content": "贵州茅台最近跌了不少，估值回到合理区间，长期看贵州茅台还是核心资产，跌出机会。", "author": "理财小鹿", "heat": 7200, "minutesAgo": 5 },
+  { "id": "xhs-002", "platform": "小红书", "title": "五粮液今天逆势上涨", "content": "五粮液今天逆势上涨，白酒板块企稳，五粮液业绩稳健，买入信号出现。", "author": "喝酒吃肉", "heat": 6100, "minutesAgo": 30 },
+  { "id": "xhs-003", "platform": "小红书", "title": "腾讯控股回购力度加大", "content": "腾讯控股持续回购，港股互联网回暖，腾讯控股突破压力位，看多腾讯控股。", "author": "港股小能手", "heat": 8400, "minutesAgo": 45 },
+  { "id": "xhs-004", "platform": "小红书", "title": "京东方面板涨价周期来了", "content": "京东方面板价格回暖，京东方业绩拐点临近，买入京东方。", "author": "面板爱好者", "heat": 4900, "minutesAgo": 48 },
+  { "id": "xhs-005", "platform": "小红书", "title": "片仔癀涨价带动业绩", "content": "片仔癀提价落地，片仔癀业绩弹性大，利好片仔癀。", "author": "中药爱好者", "heat": 4300, "minutesAgo": 75 },
+
+  { "id": "wb-001", "platform": "微博", "title": "隆基绿能光伏龙头被错杀", "content": "隆基绿能今天跌破前低，光伏行业利空出尽，隆基绿能基本面没变，中线看多隆基绿能。", "author": "光伏老兵", "heat": 6900, "minutesAgo": 12 },
+  { "id": "wb-002", "platform": "微博", "title": "东方财富业绩预告亮眼", "content": "东方财富业绩预告亮眼，券商板块异动，东方财富涨停在即，买入东方财富。", "author": "券商小当家", "heat": 7500, "minutesAgo": 20 },
+  { "id": "wb-003", "platform": "微博", "title": "中国平安估值修复行情", "content": "中国平安估值修复，保险板块迎来利好，中国平安突破年线，看多中国平安。", "author": "保险研究员", "heat": 5600, "minutesAgo": 50 },
+  { "id": "wb-004", "platform": "微博", "title": "迈瑞医疗医疗器械龙头稳", "content": "迈瑞医疗海外市场扩张，迈瑞医疗业绩稳健，利好迈瑞医疗。", "author": "医疗器械观察", "heat": 5400, "minutesAgo": 33 },
+  { "id": "wb-005", "platform": "微博", "title": "中国中免免税复苏", "content": "中国中免免税业务复苏，中国中免突破平台，利好中国中免。", "author": "消费观察", "heat": 4400, "minutesAgo": 70 },
+
+  { "id": "xq-001", "platform": "雪球", "title": "招商银行深度分析：零售之王被低估", "content": "招商银行零售业务护城河深厚，招行股息率诱人，长期买入招商银行。", "author": "价值投资笔记", "heat": 9100, "minutesAgo": 10 },
+  { "id": "xq-002", "platform": "雪球", "title": "赣锋锂业跌停，锂价见底了吗", "content": "赣锋锂业今日跌停，锂价持续下跌，利空仍在，短期看空赣锋锂业。", "author": "锂电分析师", "heat": 5800, "minutesAgo": 35 },
+  { "id": "xq-003", "platform": "雪球", "title": "美团回购与出海双轮驱动", "content": "美团持续回购，出海业务加速，美团突破前高，买入美团。", "author": "互联网老兵", "heat": 6700, "minutesAgo": 60 },
+  { "id": "xq-004", "platform": "雪球", "title": "科大讯飞大模型商业化提速", "content": "科大讯飞星火大模型商业化提速，科大讯飞突破平台，看多科大讯飞。", "author": "AI观察者", "heat": 7800, "minutesAgo": 16 },
+  { "id": "xq-005", "platform": "雪球", "title": "紫金矿业金价创新高", "content": "紫金矿业受益金价创新高，紫金矿业业绩大增，看多紫金矿业。", "author": "黄金猎手", "heat": 6200, "minutesAgo": 28 },
+
+  { "id": "gb-001", "platform": "东方财富股吧", "title": "北方稀土稀土价格暴涨", "content": "北方稀土受稀土价格暴涨利好，业绩弹性大，北方稀土涨停，看多北方稀土。", "author": "稀土之王", "heat": 8800, "minutesAgo": 18 },
+  { "id": "gb-002", "platform": "东方财富股吧", "title": "恒瑞医药创新药出海里程碑", "content": "恒瑞医药创新药出海获批，恒瑞医药突破平台，利好不断，买入恒瑞医药。", "author": "医药猎手", "heat": 7200, "minutesAgo": 40 },
+  { "id": "gb-003", "platform": "东方财富股吧", "title": "三一重工工程机械回暖", "content": "三一重工海外订单增长，工程机械周期回暖，三一重工看多。", "author": "机械狂人", "heat": 5200, "minutesAgo": 55 },
+  { "id": "gb-004", "platform": "东方财富股吧", "title": "海康威视安防龙头估值低", "content": "海康威视估值处于低位，海康威视业绩稳健，买入海康威视。", "author": "安防研究员", "heat": 5100, "minutesAgo": 42 },
+  { "id": "gb-005", "platform": "东方财富股吧", "title": "通威股份光伏硅料龙头", "content": "通威股份硅料成本优势明显，通威股份止跌企稳，买入通威股份。", "author": "光伏专家", "heat": 4600, "minutesAgo": 58 }
+]

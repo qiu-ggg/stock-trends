@@ -1,0 +1,10 @@
+{
+  "name": "stock-trends",
+  "version": "1.0.0",
+  "description": "股票舆情热点聚合站 — 聚合多平台股票讨论，做热点排行 + 可刷新 feed + 可配置数据源",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@edgeone/pages-blob": "^0.0.16"
+  }
+}

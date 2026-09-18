@@ -1,0 +1,16 @@
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
+
+# Dependencies
+node_modules/
+
+# Logs & temp files
+*.log
+.ck*.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

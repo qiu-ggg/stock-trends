@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>股海舆情 · 股票舆情热点聚合站</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://registry.npmmirror.com/echarts/5.5.1/files/dist/echarts.min.js"></script>
+</head>
+<body>
+  <div class="app">
+    <!-- 顶部迷你栏 -->
+    <header class="mini-topbar">
+      <button class="hamburger" id="btn-menu" title="菜单" aria-label="打开菜单">
+        <span class="bar"></span><span class="bar"></span><span class="bar"></span>
+      </button>
+      <div class="topbar-title">
+        <h1 class="page-title">股海舆情</h1>
+        <span class="update-time" id="update-time">尚未更新</span>
+      </div>
+      <button class="hot-trigger" id="btn-hot" title="热搜榜">
+        <span class="hot-trigger-icon">🔥</span><span class="hot-trigger-label">热搜</span>
+      </button>
+    </header>
+
+    <!-- 热搜下拉浮层 -->
+    <div class="hot-dropdown-mask hidden" id="hot-dropdown-mask"></div>
+    <div class="hot-dropdown hidden" id="hot-dropdown">
+      <div class="hot-dropdown-head">
+        <span class="hot-dropdown-title">🔥 热搜榜</span>
+        <span class="hot-dropdown-time" id="hot-dropdown-time"></span>
+      </div>
+      <div class="hot-list hot-list-dropdown" id="hot-list"></div>
+      <div class="empty hidden" id="hot-empty">
+        <div class="empty-icon">📭</div>
+        <p>暂无热点数据</p>
+      </div>
+      <div class="error hidden" id="hot-error"></div>
+    </div>
+
+    <!-- 抽屉导航 -->
+    <div class="drawer-mask hidden" id="drawer-mask"></div>
+    <aside class="drawer" id="drawer">
+      <div class="drawer-head">
+        <div class="brand">
+          <span class="brand-logo">📈</span>
+          <div class="brand-text">
+            <h1 class="brand-name">股海舆情</h1>
+            <p class="brand-sub">股票舆情热点聚合</p>
+          </div>
+        </div>
+        <button class="btn-icon-btn" id="btn-close-drawer" title="关闭">✕</button>
+      </div>
+      <nav class="side-nav">
+        <button class="nav-item active" data-view="feed" id="nav-feed">讨论</button>
+        <button class="nav-item" data-view="stock" id="nav-stock">股票分析</button>
+      </nav>
+      <div class="side-foot">
+        <button class="btn btn-ghost side-btn" id="btn-open-config" title="配置">
+          <span class="btn-icon">⚙</span><span class="btn-label">配置</span>
+        </button>
+      </div>
+    </aside>
+
+    <!-- 主内容 -->
+    <main class="main">
+      <!-- 讨论视图（默认） -->
+      <section class="view view-feed active" id="view-feed">
+        <div class="panel feed-panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>最新讨论</h2>
+              <span class="panel-desc">实时抓取各平台热议内容</span>
+            </div>
+            <div class="panel-actions">
+              <div class="feed-sort" id="feed-sort">
+                <button class="sort-btn" id="btn-sort-heat" data-sort="heat">热度</button>
+                <button class="sort-btn active" id="btn-sort-time" data-sort="time">时间</button>
+              </div>
+              <button class="btn btn-outline btn-sm" id="btn-refresh-feeds" title="刷新讨论">
+                <span class="btn-icon">⟳</span><span class="btn-label">刷新</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="feed-search">
+            <input type="text" id="feed-search-input" class="feed-search-input" placeholder="搜索公司名或股票代码，如：茅台 / 600519" autocomplete="off" />
+            <button class="btn btn-primary btn-sm" id="btn-search">搜索</button>
+            <button class="btn btn-ghost btn-sm" id="btn-search-clear" title="清除搜索">✕</button>
+          </div>
+
+          <div class="feed-filter" id="feed-filter"></div>
+          <div class="feed-list" id="feed-list"></div>
+
+          <div class="feed-pager" id="feed-pager">
+            <button class="btn btn-outline btn-sm" id="btn-prev-page">‹ 上一页</button>
+            <span class="pager-info" id="pager-info">第 1 页</span>
+            <button class="btn btn-outline btn-sm" id="btn-next-page">下一页 ›</button>
+          </div>
+          <div class="empty hidden" id="feed-empty">
+            <div class="empty-icon" id="feed-empty-icon">📭</div>
+            <p id="feed-empty-text">暂无讨论内容</p>
+          </div>
+          <div class="error hidden" id="feed-error"></div>
+        </div>
+      </section>
+
+      <!-- 股票分析视图 -->
+      <section class="view view-stock" id="view-stock">
+        <div class="panel stock-panel">
+          <div class="panel-head">
+            <div class="panel-title">
+              <h2>股票分析</h2>
+              <span class="panel-desc">智能盯盘与投研</span>
+            </div>
+          </div>
+
+          <div class="feed-search stock-search">
+            <input type="text" id="stock-search-input" class="feed-search-input" placeholder="输入公司名或股票代码，如：茅台 / 600519" autocomplete="off" />
+            <button class="btn btn-primary btn-sm" id="btn-stock-search">分析</button>
+          </div>
+
+          <div class="watchlist-box" id="watchlist-box">
+            <div class="watchlist-head">
+              <span class="watchlist-title">自选股</span>
+              <span class="watchlist-count" id="watchlist-count"></span>
+            </div>
+            <div class="watchlist-items" id="watchlist-items"></div>
+          </div>
+
+          <div class="stock-result" id="stock-result">
+            <div class="empty" id="stock-empty">
+              <div class="empty-icon">📊</div>
+              <p>输入股票名称或代码，开始智能分析</p>
+            </div>
+
+            <div class="stock-body hidden" id="stock-body">
+              <div class="stock-quote" id="stock-quote"></div>
+              <div class="quote-grid" id="quote-grid"></div>
+              <div class="score-grid" id="score-grid"></div>
+              <div class="score-legend">
+                <button class="info-btn" id="btn-score-help" title="评分说明">?</button>
+              </div>
+
+              <!-- 七档动作判定（StockSentry 引擎） -->
+              <div class="action-box" id="action-box"></div>
+
+              <div class="chart-tabs" id="chart-tabs">
+                <button class="chart-tab active" data-chart="trends">分时</button>
+                <button class="chart-tab" data-chart="kline5">五日</button>
+                <button class="chart-tab" data-chart="kline">日K</button>
+              </div>
+              <div class="chart-box">
+                <div id="trends-chart" class="chart chart-trends"></div>
+                <div id="kline5-chart" class="chart chart-kline hidden"></div>
+                <div id="kline-chart" class="chart chart-kline hidden"></div>
+              </div>
+
+              <!-- 九类轨道综合研判（回归导轨通道 / 唐奇安 / 布林 / 枢轴关键位） -->
+              <div class="channel-box" id="channel-box"></div>
+
+              <div class="plan-box" id="plan-box"></div>
+
+              <!-- 个股画像（自动画像 / 研报画像库） -->
+              <div class="profile-box" id="profile-box"></div>
+
+              <div class="signal-box" id="signal-box"></div>
+              <div class="monitor-box" id="monitor-box"></div>
+              <div class="report-box" id="report-box"></div>
+            </div>
+          </div>
+          <div class="error hidden" id="stock-error"></div>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <p>数据来源于东方财富股吧 · 同花顺 · 腾讯行情 · 内容仅供参考，不构成投资建议</p>
+      </footer>
+    </main>
+  </div>
+
+  <!-- 股票详情视图 -->
+  <div class="detail-view hidden" id="detail-view">
+    <div class="detail-head">
+      <button class="btn btn-ghost btn-sm" id="btn-detail-back">← 返回</button>
+      <h2 class="detail-title" id="detail-title">相关讨论</h2>
+      <div class="feed-sort">
+        <button class="sort-btn" id="btn-detail-sort-heat" data-sort="heat">热度</button>
+        <button class="sort-btn active" id="btn-detail-sort-time" data-sort="time">时间</button>
+      </div>
+    </div>
+    <div class="detail-list" id="detail-list"></div>
+    <div class="empty hidden" id="detail-empty">
+      <div class="empty-icon">📭</div>
+      <p>暂无相关讨论</p>
+    </div>
+    <div class="feed-pager" id="detail-pager">
+      <button class="btn btn-outline btn-sm" id="btn-detail-prev">‹ 上一页</button>
+      <span class="pager-info" id="detail-pager-info">第 1 页</span>
+      <button class="btn btn-outline btn-sm" id="btn-detail-next">下一页 ›</button>
+    </div>
+  </div>
+
+  <!-- API 配置面板（模态） -->
+  <div class="modal-mask hidden" id="config-modal">
+    <div class="modal">
+      <div class="modal-head">
+        <h2>配置</h2>
+        <button class="btn-icon-btn" id="btn-close-config" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-tip">配置各平台数据源入口。保存后将用于后端抓取与聚合。</p>
+        <div class="config-form">
+          <div class="config-row config-row-head">
+            <span class="col-enable">启用</span>
+            <span class="col-name">平台</span>
+            <span class="col-url">API 地址</span>
+            <span class="col-key">API Key</span>
+          </div>
+          <div id="config-list"></div>
+        </div>
+        <div class="ths-cookie-box">
+          <div class="ths-cookie-head">
+            <span class="ths-cookie-title">同花顺讨论区（可选）</span>
+            <span class="ths-cookie-badge">需登录 Cookie</span>
+          </div>
+          <p class="ths-cookie-tip">
+            <b>如何获取 Cookie：</b><br />
+            ① 用浏览器打开 <b>t.10jqka.com.cn</b> 并登录你的同花顺账号；<br />
+            ② 登录后按 <b>F12</b> 打开开发者工具 → 切到 <b>「应用 / Application」</b>标签 → 左侧 <b>「Cookie」</b> → 点击域名 <b>t.10jqka.com.cn</b>；<br />
+            ③ 找到 <b>v=</b> 开头的那一项，复制它的<b>名称和值</b>（形如 <code>v=Axxxxxxx...</code>），粘贴到下方输入框；<br />
+            ④ 点「保存配置」。Cookie 会过期，失效后按同样步骤重新获取一次即可。
+          </p>
+          <textarea id="cfg-ths-cookie" class="ths-cookie-input" rows="2" placeholder="v=Axxxxxxxxxxxxxxxx（粘贴同花顺登录 Cookie）"></textarea>
+        </div>
+        <label class="auto-refresh">
+          <span>自动刷新间隔（秒）</span>
+          <input type="number" id="cfg-auto-refresh" min="5" max="3600" step="5" value="60" />
+          <span class="auto-refresh-hint">范围 5–3600 秒，默认 60 秒</span>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <span class="config-status" id="config-status"></span>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="btn-cancel-config">取消</button>
+          <button class="btn btn-primary" id="btn-save-config">保存配置</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 评分依据弹窗 -->
+  <div class="modal-mask hidden" id="score-detail-modal">
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h2 id="score-detail-title">评分依据</h2>
+        <button class="btn-icon-btn" id="btn-close-score-detail" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="reason-list" id="score-detail-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 评分名词解释弹窗 -->
+  <div class="modal-mask hidden" id="score-help-modal">
+    <div class="modal modal-sm">
+      <div class="modal-head">
+        <h2>评分名词解释</h2>
+        <button class="btn-icon-btn" id="btn-close-score-help" title="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="help-list" id="score-help-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="profiles.js"></script>
+  <script src="data.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
